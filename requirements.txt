@@ -1,0 +1,8 @@
+pandas
+numpy
+smartapi-python
+logzero
+pyotp
+websocket-client==1.6.4
+supabase
+requests
