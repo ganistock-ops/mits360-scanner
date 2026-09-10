@@ -78,23 +78,37 @@ class AngelOneConnector:
 
 
 def scan_universe(connector: AngelOneConnector, instruments: list[dict],
-                   rate_limit_delay: float = 0.35) -> dict:
+                   rate_limit_delay: float = 1.0, max_retries: int = 3) -> dict:
     """
     instruments: list of {'symbol': 'TCS', 'token': '11536', 'exchange': 'NSE'}
                  — this is your Nifty 50 + Nifty 500 list with Angel One tokens.
-    rate_limit_delay: seconds between calls, to stay well under Angel One's
-                       API rate limits when looping ~500 stocks.
+    rate_limit_delay: seconds between calls. Angel One's documented limit for
+                       getCandleData is 3/sec, 180/min — but their server has
+                       reported intermittent false-positive throttling even
+                       well under that limit, so we stay conservative (1.0s =
+                       ~60/min, well under the 180/min cap) and retry on
+                       failure instead of pushing the delay to the edge.
+    max_retries: on a rate-limit-looking failure, wait longer and retry
+                 before giving up on that stock.
 
     Returns {symbol: DataFrame} for every stock successfully fetched.
     Failed fetches are skipped and logged, not fatal to the whole scan.
     """
     results = {}
     for inst in instruments:
-        try:
-            df = connector.get_daily_candles(inst['token'], inst.get('exchange', 'NSE'))
-            results[inst['symbol']] = df
-        except Exception as e:
-            print(f"[SKIP] {inst['symbol']}: {e}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                df = connector.get_daily_candles(inst['token'], inst.get('exchange', 'NSE'))
+                results[inst['symbol']] = df
+                break
+            except Exception as e:
+                is_last = attempt == max_retries
+                if is_last:
+                    print(f"[SKIP] {inst['symbol']}: {e}")
+                else:
+                    backoff = rate_limit_delay * (3 ** attempt)   # 3s, 9s, 27s...
+                    print(f"[RETRY {attempt}/{max_retries}] {inst['symbol']}: {e} — waiting {backoff:.0f}s")
+                    time.sleep(backoff)
         time.sleep(rate_limit_delay)
     return results
 
