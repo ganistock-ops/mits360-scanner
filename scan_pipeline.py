@@ -11,6 +11,7 @@ Environment variables required (set as GitHub Actions Secrets):
 """
 
 import os
+import time
 import datetime as dt
 from supabase import create_client
 
@@ -21,6 +22,24 @@ from scanner_logic import (
     calculate_rs_score, rank_universe_rs,
     detect_ma_crossover, detect_volume_shocker
 )
+
+RATE_LIMIT_DELAY = 1.0    # seconds between candle fetches (Angel One: 3/sec, 180/min documented)
+MAX_RETRIES = 3
+
+
+def fetch_with_retry(connector, symbol, token, exchange):
+    """Fetches one stock's candles, retrying with backoff on rate-limit-like
+    failures instead of giving up immediately (Angel One's server has
+    reported intermittent throttling even under the documented limit)."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return connector.get_daily_candles(token, exchange)
+        except Exception as e:
+            if attempt == MAX_RETRIES:
+                raise
+            backoff = RATE_LIMIT_DELAY * (3 ** attempt)   # 3s, 9s, 27s
+            print(f"[RETRY {attempt}/{MAX_RETRIES}] {symbol}: {e} — waiting {backoff:.0f}s")
+            time.sleep(backoff)
 
 
 def get_supabase():
@@ -58,10 +77,12 @@ def run_daily_scan():
     for inst in universe:
         symbol = inst['symbol']
         try:
-            df = connector.get_daily_candles(inst['token'], inst['exchange'])
+            df = fetch_with_retry(connector, symbol, inst['token'], inst['exchange'])
         except Exception as e:
             print(f"[SKIP] {symbol}: fetch failed — {e}")
+            time.sleep(RATE_LIMIT_DELAY)
             continue
+        time.sleep(RATE_LIMIT_DELAY)
 
         if len(df) < 60:
             print(f"[SKIP] {symbol}: not enough history ({len(df)} rows)")
