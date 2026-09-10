@@ -20,65 +20,65 @@ import numpy as np
 # 1. BASE BREAKOUT (VCP-style, with lifecycle stage)
 # ---------------------------------------------------------------------------
 
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Average True Range — used to make the base 'tightness' check dynamic
-    per stock's own volatility instead of a fixed % for every stock."""
-    high, low, close = df['high'], df['low'], df['close']
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def detect_base_breakout(df: pd.DataFrame, min_base_days: int = 20,
-                          atr_multiple: float = 2.5,
-                          volume_mult: float = 1.5,
-                          volume_avg_days: int = 50) -> dict:
+def detect_base_breakout(df: pd.DataFrame, lookback: int = 40,
+                          freshness_days: int = 10,
+                          magnitude_pct: float = 5.0,
+                          volume_sma_period: int = 10,
+                          volume_pct_above: float = 25.0) -> dict:
     """
-    Base = last `min_base_days` (20-25) candles before today.
-    Base is 'tight' if (base_high - base_low) <= atr_multiple * ATR(14) — this
-    is the dynamic, volatility-adjusted range check (no fixed % for all stocks).
-    Breakout = today's close > base_high AND today's volume >= volume_mult * avg volume.
-
-    Returns a dict describing today's classification for this stock:
-    stage in {'forming', 'fresh_breakout', 'not_applicable'}
-    plus the numbers used, so the caller can persist state for
-    climbing/played_out tracking (which needs day-over-day history, not
-    a single day's data — see track_breakout_stage below).
+    Matches the exact rule set specified (screener-style config):
+      1. Break Out of `lookback` (40) period High — today's close > highest
+         high of the preceding `lookback` candles.
+      2. Freshness: that prior high must NOT have already been closed above
+         in the last `freshness_days` (10) sessions — avoids flagging a
+         breakout that already happened recently (whipsaw/repeat signals).
+      3. Magnitude: today's close must be at least `magnitude_pct` (5%)
+         above that prior high — filters out marginal/weak breaks.
+      4. Volume: today's volume >= (1 + volume_pct_above/100) × the
+         `volume_sma_period` (10) day SMA of volume, i.e. >=25% above the
+         10-day average.
+      5. Bullish confirmation: today's close > previous day's open (OHLC
+         compare rule from the screener config).
     """
-    if len(df) < min_base_days + 15:
+    min_len = lookback + max(freshness_days, volume_sma_period) + 2
+    if len(df) < min_len:
         return {'stage': 'insufficient_data'}
 
-    df = df.copy()
-    df['atr'] = calculate_atr(df)
-
-    base = df.iloc[-(min_base_days + 1):-1]     # the base window, excluding today
     today = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    base_high = base['high'].max()
-    base_low = base['low'].min()
-    base_range = base_high - base_low
-    today_atr = df['atr'].iloc[-1]
+    # Highest high over the lookback window, excluding today
+    window = df.iloc[-(lookback + 1):-1]
+    prev_high = window['high'].max()
 
-    is_tight = today_atr > 0 and base_range <= (atr_multiple * today_atr)
+    # Freshness: was this level already closed above in the last freshness_days?
+    recent_closes = df.iloc[-(freshness_days + 1):-1]['close']
+    already_broken_recently = bool((recent_closes > prev_high).any())
 
-    avg_vol = df['volume'].iloc[-(volume_avg_days + 1):-1].mean()
-    vol_ok = avg_vol > 0 and today['volume'] >= (volume_mult * avg_vol)
+    breakout_close = bool(today['close'] > prev_high)
 
-    breakout_today = is_tight and (today['close'] > base_high) and vol_ok
+    magnitude_pct_actual = ((today['close'] - prev_high) / prev_high * 100) if prev_high else None
+    magnitude_ok = magnitude_pct_actual is not None and magnitude_pct_actual >= magnitude_pct
+
+    vol_sma = df['volume'].iloc[-(volume_sma_period + 1):-1].mean()
+    volume_ratio = (today['volume'] / vol_sma) if vol_sma else None
+    volume_ok = vol_sma > 0 and today['volume'] >= vol_sma * (1 + volume_pct_above / 100)
+
+    bullish_ok = bool(today['close'] > prev['open'])
+
+    breakout_today = bool(
+        breakout_close and (not already_broken_recently) and magnitude_ok and volume_ok and bullish_ok
+    )
 
     return {
         'stage': 'fresh_breakout' if breakout_today else 'forming',
-        'base_high': round(base_high, 2),
-        'base_low': round(base_low, 2),
-        'base_range_pct': round((base_range / base_low) * 100, 2) if base_low else None,
-        'is_tight_base': bool(is_tight),
-        'today_close': round(today['close'], 2),
-        'today_volume_vs_avg': round(today['volume'] / avg_vol, 2) if avg_vol else None,
-        'breakout_today': bool(breakout_today),
+        'base_high': round(float(prev_high), 2),
+        'today_close': round(float(today['close']), 2),
+        'magnitude_pct': round(magnitude_pct_actual, 2) if magnitude_pct_actual is not None else None,
+        'today_volume_vs_avg': round(volume_ratio, 2) if volume_ratio is not None else None,
+        'already_broken_recently': already_broken_recently,
+        'bullish_confirm': bullish_ok,
+        'breakout_today': breakout_today,
     }
 
 
