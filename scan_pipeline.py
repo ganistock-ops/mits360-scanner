@@ -112,7 +112,7 @@ def run_daily_scan():
             'symbol': symbol,
             'scan_date': today,
             'price': today_close,
-            'base_range_pct': breakout.get('base_range_pct'),
+            'base_range_pct': breakout.get('magnitude_pct'),
             'volume_vs_avg': breakout.get('today_volume_vs_avg'),
             'rs_score': rs.get('rs_score'),
             'rs_rank': rs_ranks.get(symbol),
